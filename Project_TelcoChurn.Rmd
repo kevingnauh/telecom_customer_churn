@@ -1,0 +1,589 @@
+---
+title: "Telecom Churn Prediction"
+author: "Kevin Huang"
+output:
+  rmarkdown::github_document: 
+    toc: true
+  html_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(car)
+library(corrplot)
+library(ggplot2)
+library(vcd)
+library(pROC)
+library(caret)
+library(mltools)
+library(data.table)
+library(lime)
+
+```
+
+## Introduction
+
+Customer retention is an important aspect of businesses across many sectors. When a
+customer leaves, it leads to a loss of revenue and more time and resources needs to be spent
+to acquire new customers. Customer churn is used to describe customers leaving a company
+and churn prediction is a way to detect which customers are most likely to cancel their
+subscription to a service. By being able to identify the customers most likely to leave, a
+company can anticipate what actions to take to convince the customer to stay. It is extremely
+important to understand different customer preferences and behavior that might lead to their
+cancellation. Churn prediction is also important in identifying at-risk customers so that additional
+resources are not unnecessarily spent on perfectly happy customers resulting in reduced
+revenue. In this project, I will use exploratory data analysis to gain a deeper understanding on the features in this data set and identify ones that would be helpful to predicting churn. I will develop prediction models using multiple methods and determine the most effective model for this data. 
+
+## Data Description
+
+This Telecom data set provided by Kaggles has 7,043 records with 20 predictor variables and 1 binary response variable indicating whether or not the customer left. There are 16 categorical and 4 numeric predictors that contain various information about the customers and the type of accounts they had with the company. Each row represents a customer.
+  
+  - Gender - gender of the account holder. 
+  
+  - SeniorCitizen - binary variable that indicates if they were a senior citizen. 
+
+  - Partner - indicates whether they had a partner. 
+
+  - Dependent - indicates if they had other users on the account. 
+
+  - Tenure - how long they have been with the company in months. 
+
+  - PhoneService - indicates if the account signed up for phone services.
+  
+  - MultipleLines - indicates if the account signed up for multiple phone lines.
+  
+  - InternetService - indicates if the account signed up for internet services.
+    
+  - OnlineSecurity - indicates if the account signed up for online security.
+   
+  - OnlineBackup - indicates if the account signed up for online backup.
+  
+  - DeviceProtection - indicates if the account signed up for device protection.
+  
+  - TechSupport - indicates if the account signed up for tech support.
+  
+  - StreamingTV - indicates if the account signed up for streaming tv.
+  
+  - StreamingMovies - indicates if the account signed up for streaming moveies;
+
+  - Contract - indicates the type of payment plan they signed up. 
+
+  - PaperlessBilling - indicates if the customer signed up for paperless billing.
+  
+  - PaymentMethod - indicates how the customer made their payments.
+
+  - MonthlyCharges - amount the customer paid monthly for the services they signed up for.
+  
+  - TotalCharges - cumulative amount the customer has paid the company.
+
+```{r}
+### Read data
+
+data <- read.csv('WA_Fn-UseC_-Telco-Customer-Churn.csv')
+
+glimpse(data)
+
+```
+# Data Cleaning and Exploration
+
+In this section, I explore and clean the data.
+I begin by counting the number of NAs in the entire data set. TotalCharges contained 11 NAs. I decided to delete these records because they made up only 0.16% of the available data. Other methods for filling in these missing values include linear interpolation and statistical imputing (mean, median, mode). I did not believe it was necessary because the remaining data was still quite large.
+After removing the NAs, I looked at the number of unique values in each predictor to get an idea of how many categories there are in the categorical predictors. The categorical predictors were then separated into their own dataframe, with the unique values listed in each. I left out customerID because it is a unique identifier for each customer and would not help with prediction decisions.
+
+For the service related predictors such as OnlineSecurity, I noticed one of the categories was "No internet service". This essentially means the same as having a "no" in that field, so I replaced those values with the mutate function. To prepare for the model, I also converted the character columns to factor type.
+
+```{r}
+# Check NA counts in every column
+colSums(is.na(data))
+
+# Remove records with NA's
+data <- data[complete.cases(data),]
+
+# Total number of unique values in each predictor
+sapply(lapply(data, unique), length)
+
+# Separate categorical predictors to explore separately
+chr_vars <- data %>% 
+  select_if(is.character) %>%
+  select(-customerID)
+lapply(chr_vars, unique)
+
+```
+
+
+```{r}
+# Replace categories in columns where 'no service' has same meaning as 'no'
+# Convert character columns to factor columns
+data <- data %>%
+     mutate(MultipleLines = case_when(MultipleLines== "No phone service"~ 'No', TRUE ~ MultipleLines)) %>%
+     mutate(OnlineSecurity = case_when(OnlineSecurity== "No internet service"~ 'No', TRUE ~ OnlineSecurity)) %>%
+     mutate(OnlineBackup = case_when(OnlineBackup== "No internet service"~ 'No', TRUE ~ OnlineBackup)) %>%
+     mutate(DeviceProtection = case_when(DeviceProtection== "No internet service"~ 'No', TRUE ~ DeviceProtection)) %>%
+     mutate(TechSupport = case_when(TechSupport== "No internet service"~ 'No', TRUE ~ TechSupport)) %>%
+     mutate(StreamingTV = case_when(StreamingTV== "No internet service"~ 'No', TRUE ~ StreamingTV)) %>%
+     mutate(StreamingMovies = case_when(StreamingMovies== "No internet service"~ 'No', TRUE ~ StreamingMovies)) %>%
+     mutate(Churn = case_when(Churn== "No"~ '0', TRUE ~ '1')) %>%
+     mutate_if(is.character, as.factor) %>%
+     mutate(SeniorCitizen = factor(SeniorCitizen))
+
+sapply(lapply(data, unique),length)
+
+# Count of response variable Churn 
+table(data$Churn)
+
+```
+
+
+
+# Data Exploration 
+
+In this section, we look at some basic statistics by gender and current/former customers to get a sense of the average customer. 
+
+### What is the average tenure and charges based on gender?
+```{r}
+data %>% 
+  group_by(gender) %>% 
+  rename("Gender" = gender) %>% 
+  summarise("Number of Observations" = n(),
+            "Average Tenure, in months" = round(mean(tenure), 0),
+            "Monthly Charges" = round(mean(MonthlyCharges), 2),
+            "Total Charges" = round(mean(TotalCharges), 2),
+            across(Churn, list('0' = ~ sum(. == 0),
+                         ' 1'  = ~ sum(. == 1)
+            )))
+
+
+```
+
+### What is the average tenure and charges for current and former customers?
+```{r}
+data %>% 
+  group_by(Churn) %>% 
+  rename("Churn" = Churn) %>% 
+  summarise("Number of Observations" = n(),
+            "Average Tenure, in months" = round(mean(tenure), 0),
+            "Monthly Charges" = round(mean(MonthlyCharges), 2),
+            "Total Charges" = round(mean(TotalCharges), 2),
+            across(gender, list(Male = ~ sum(. == "Male"),
+                          Female  = ~ sum(. == "Female")
+            )))
+
+
+
+```
+
+ - The data has 3483 Females and 3549 Males. 
+ - The average Tenure, in months for Females is 32.
+ - The average Tenure, in months for Males is 33.
+ - The average Monthly Charges for Females is 65.22.
+ - The average Monthly Charges for Males is 64.39.
+ - The average Total Charges for Females is 2283.19.
+ - The average Total Charges for Males is 2283.41.
+
+
+
+
+### Distribution Plots for Numerical Variables
+```{r, fig.show="hold", out.width="50%"}
+data %>% 
+  ggplot(aes(x = MonthlyCharges)) + 
+  geom_histogram(bins = 20) +
+  ggtitle('Distribution of MonthlyCharges') +
+  geom_vline(aes(xintercept = mean(MonthlyCharges)), col = "red", linetype="dashed")+
+  annotate(geom = "vline", label = 'Target line')
+
+data %>% 
+  ggplot(aes(x = TotalCharges)) + 
+  geom_histogram(bins = 20) +
+  ggtitle('Distribution of TotalCharges') +
+  geom_vline(aes(xintercept = mean(TotalCharges)), col = "red", linetype="dashed")
+
+```
+
+Looking at the correlation matrix for the numerical predictors, I notice that MonthlyCharges and TotalCharges appear to be relatively highly correlated. TotalCharges appears to be highly correlated with MonthlyCharges as well as tenure. I will leave these variables in the data for the time being and decide which to remove later when building the logistic regression model.
+
+```{r}
+
+# Correlation Matrix to see if multicollinearity exists between numeric variables
+num_var <- data %>%
+  select_if(is.numeric)
+corr.matrix <- cor(num_var)
+corrplot(corr.matrix, main="\n\nCorrelation Plot for Numerical Variables", method="number")
+
+```
+
+
+
+### Bar Plots for Categorical Variables
+
+```{r, fig.show="hold", out.width="50%"}
+
+par(mar = c(4, 4, .1, .1))
+# Looking into the response variable
+# Count of Yes/No's in Churn
+# Bar Plot for Churn
+data %>% 
+  ggplot(aes(x = Churn, fill = Churn)) +
+  geom_bar() + 
+  ggtitle('Count of Churn') +
+  geom_text(stat='count', aes(label=..count..), vjust=1)  
+
+data %>% 
+  ggplot(aes(x = gender, fill = gender)) +
+  geom_bar() + 
+  ggtitle('Count of gender') +
+  geom_text(stat='count', aes(label=..count..), vjust=1)  
+
+data %>% 
+  ggplot(aes(x = Partner, fill = Partner)) +
+  geom_bar() + 
+  ggtitle('Count of Partner') +
+  geom_text(stat='count', aes(label=..count..), vjust=1)  
+
+data %>% 
+  ggplot(aes(x = Dependents, fill = Dependents)) +
+  geom_bar() + 
+  ggtitle('Count of Dependents') +
+  geom_text(stat='count', aes(label=..count..), vjust=1)  
+
+
+
+```
+
+
+### Baseline Rate for Former customers (Positive = 1 : Former Customers )
+
+The baseline rate for this project is calculated by dividing the total number of churn = 1 by the number of churn = 0. This is to establish a baseline against which my models can be compared. The goal is to create a model that outperforms the current baseline rate. If a model's prediction is not better than the baseline rate, using the baseline rate for predictions is simpler and less expensive.
+
+```{r}
+count_churn <- count(data, Churn)
+baseline_rate = count_churn$n[2]/(count_churn$n[1] + count_churn$n[2])
+
+baseline_rate
+
+```
+# Split Training and Testing data
+
+I begin by building the logistic regression model. I removed the customerID because it is a unique identifier that is not a feature of the response variable.
+I split 80% of the data to use for training the model and reserve 20% for testing the model.
+
+```{r}
+
+# Set seed
+set.seed(109)
+
+cleaned_data <- data %>% dplyr::select(-c(customerID))
+
+str(cleaned_data)
+
+# Split train and test data
+ind <- sample(2, nrow(cleaned_data), replace = T, prob = c(0.8, 0.2))
+train <- cleaned_data[ind == 1,]
+test <- cleaned_data[ind == 2,]
+
+
+```
+
+# Logistic Regression
+
+I begin with a logistic regression model that takes into account all variables.
+Looking at the logistic regression summary results, I notice that MonthlyCharges is not a significant variable to the response variable. The logistic regression null hypothesis states that there is no relationship between the response variable and the predictor variable. The alternative hypothesis holds that there is a connection. We will reject the alternate hypothesis and conclude that there is no relationship between MonthlyCharges and the response variable because the p-value for MonthlyCharges is significant at.206, which is greater than 0.05 for the 95% confidence interval. My next step will be to examine the model's Variance Inflation Factor. 
+The VIF is a multicollinearity measure in a set of multiple regression variables. The ideal VIF number would be less than 10, indicating that there is little multicollinearity between the variables. Variables with high multicollinearity are those that are highly related to another variable and can be achieved with just one of them.
+MonthlyCharges has a high VIF number here of 26.459. MonthlyCharges was removed from the model, and the remaining predictors were used to predict on the training and testing data.
+Using this model to predict on the training data, we get an accuracy of 0.7448, sensitivity of 0.8257, and specificity of 0.7162. The area under the curve is 84.9%.
+Using this model to predict on the testing data, we get an accuracy of 0.7481, sensitivity of 0.8228, and specificity of 0.7185.
+
+I perform a stepwise AIC on the model to determine which predictors are not adding much value to the model. Because the AIC is a predictor of error, the lower the AIC score, the better the model. The stepwiseAIC identifies and compares all possible stepwise removals of a term from the model. The final model suggested after running the stepwise AIC is with predictors SeniorCitizen, Dependents, tenure, PhoneService, MultipleLines, InternetService, OnlineSecurity, OnlineBackup, TechSupport, StreamingTV, StreamingMovies, Contract, PaperlessBilling, PaymentMethod, and TotalCharges.
+
+I test the final model by predicting on the training data itself using only significant variables.
+We get an accuracy of 0.7326, sensitivity of 0.8353, and specificity of 0.6963 when we use the final model to predict on the training data. The percentage of the area under the curve is 84.4%.
+We get an accuracy of 0.7357, sensitivity of 0.8301, and specificity of 0.6984 when we use the final model to predict on the testing data. Because the model's accuracy on the training and testing data was similar, I concluded that overfitting and underfitting are unlikely to be an issue here.
+
+The final model's result with only significant variables was not what I expected. The accuracy decreased from 0.7448 to 0.7326 on the training data and from 0.7481 to 0.7357 on the testing data when compared to the model with all variables included.
+
+```{r,echo=FALSE}
+library(MASS)
+```
+
+```{r}
+# Logistic regression
+m <- glm(Churn~. , data = train, family = 'binomial' )
+summary(m)
+
+# Check VIF values
+vif(m)
+
+m_aic <- stepAIC(m, direction = "both", trace = F)
+summary(m_aic)
+m_aic
+
+
+# Remove MonthlyCharges with VIF 26.46
+train <- train %>% dplyr::select(-c(MonthlyCharges))
+test <- test %>% dplyr::select(-c(MonthlyCharges))
+
+
+# Logistic regression
+m <- glm(Churn~. , data = train, family = 'binomial' )
+summary(m)
+
+# Check VIF values
+vif(m)
+
+m_aic <- stepAIC(m, direction = "both", trace = F)
+summary(m_aic)
+m_aic
+
+detach("package:MASS", unload=TRUE)
+
+p1 <- predict(m, type = 'response')
+r <- multiclass.roc(train$Churn, p1, percent = TRUE)
+roc <- r[['rocs']]
+r1 <- roc[[1]]
+
+plot.roc(r1,
+         col = 'red',
+         lwd = 5,
+         main = 'ROC Curve for Telecom Data',
+         print.auc = T,
+         auc.polygon = T,
+         grid = c(0.1, 0.2),
+         grid.col = c('green', 'red'),
+         max.auc.polygon = T,
+         auc.polygon.col = 'lightblue',
+         print.thres = T)
+
+auc(r1)
+
+cutoff <- coords(r1, "best", ret = "threshold", transpose = FALSE)$threshold
+cutoff
+
+pred1 <- ifelse(p1>cutoff, 1, 0)
+conf <- table(Predicted = pred1, Actual = train$Churn)
+conf
+sensitivity(conf)
+specificity(conf)
+
+cm <- confusionMatrix(factor(pred1), factor(train$Churn), positive = '1')
+cm
+
+
+
+# Predictions - test data (Accuracy = 70.66%, Misclassification = 29.33%)
+p1_test <- predict(m, test, type = 'response')
+
+r <- multiclass.roc(test$Churn, p1_test, percent = TRUE)
+roc <- r[['rocs']]
+r1 <- roc[[1]]
+
+
+pred2 <- ifelse(p1_test > cutoff ,1, 0)
+table(Predicted = pred2, Actual = test$Churn)
+
+cm1 <- confusionMatrix(factor(pred2), factor(test$Churn), positive = '1')
+cm1
+
+```
+
+# Logistic regression - significant variables
+```{r}
+
+data_sig <- cleaned_data %>%
+  select( c(SeniorCitizen,
+          Dependents,
+          tenure,
+          MultipleLines,
+          InternetService,
+          StreamingTV,
+          StreamingMovies,
+          Contract,
+          PaperlessBilling,
+          PaymentMethod,
+          TotalCharges,
+          Churn))
+
+# Set seed
+set.seed(109)
+
+# Split train and test data
+ind <- sample(2, nrow(data_sig), replace = T, prob = c(0.8, 0.2))
+train <- data_sig[ind == 1,]
+test <- data_sig[ind == 2,]
+
+# Logistic regression
+m2 <- glm(Churn~. , data = train, family = 'binomial' )
+summary(m2)
+
+# Check VIF values
+vif(m2)
+
+
+
+p2 <- predict(m2, type = 'response')
+r <- multiclass.roc(train$Churn, p2, percent = TRUE)
+roc <- r[['rocs']]
+r2 <- roc[[1]]
+
+plot.roc(r2,
+         col = 'red',
+         lwd = 5,
+         main = 'ROC Curve for Telecom Data',
+         print.auc = T,
+         auc.polygon = T,
+         grid = c(0.1, 0.2),
+         grid.col = c('green', 'red'),
+         max.auc.polygon = T,
+         auc.polygon.col = 'lightblue',
+         print.thres = T)
+
+auc(r1)
+
+cutoff <- coords(r2, "best", ret = "threshold", transpose = FALSE)$threshold
+cutoff
+
+pred1 <- ifelse(p1>cutoff, 1, 0)
+conf <- table(Predicted = pred1, Actual = train$Churn)
+conf
+sensitivity(conf)
+specificity(conf)
+
+cm <- confusionMatrix(factor(pred1), factor(train$Churn), positive = '1')
+cm
+
+
+# Predictions - test data (Accuracy = 70.66%, Misclassification = 29.33%)
+p1_test <- predict(m2, test, type = 'response')
+
+r <- multiclass.roc(test$Churn, p1_test, percent = TRUE)
+roc <- r[['rocs']]
+r1 <- roc[[1]]
+
+
+pred2 <- ifelse(p1_test > cutoff ,1, 0)
+table(Predicted = pred2, Actual = test$Churn)
+
+cm1 <- confusionMatrix(factor(pred2), factor(test$Churn), positive = '1')
+cm1
+
+
+```
+
+
+# Random forest
+
+I begin by removing the customerID from the data for the random forest model. I divide the data into 80% for training and 20% for testing.
+I set the cvcontrol to repeat 5 folds twice.
+The random forest plot reveals that the top five most important variables were tenure, total charges, internet service, monthly charges, and tech support. Because random forest models are non-parametric, they are unaffected by multicollinearity between predictors, so I included all variables in the model.
+
+Using the random forest model to predict on the training data, we get an accuracy of 0.8527 , sensitivity of 0.5669, and specificity of .9537. 
+Using the random forest model to predict on the testing data, we get an accuracy of 0.7873 , sensitivity of 0.4466, and specificity of 0.9222.
+
+```{r}
+# Set seed
+set.seed(109)
+
+cleaned_data <- data %>% dplyr::select(-c(customerID))
+
+# Split train and test data
+ind <- sample(2, nrow(cleaned_data), replace = T, prob = c(0.8, 0.2))
+train <- cleaned_data[ind == 1,]
+test <- cleaned_data[ind == 2,]
+
+
+cvcontrol <- trainControl(method="repeatedcv",
+                          number = 5,
+                          repeats = 2,
+                          allowParallel=TRUE)
+
+# RF
+forest <- train(Churn ~ . ,
+             data=train,
+             method="rf",
+             trControl=cvcontrol,
+             importance=TRUE)
+plot(varImp(forest))
+
+
+p_rf_train <- predict(forest, train, type = 'raw')
+confusionMatrix(p_rf_train, train$Churn, positive = '1')
+
+
+p_rf <- predict(forest, test, type = 'raw')
+confusionMatrix(p_rf, test$Churn, positive = '1')
+
+```
+
+
+
+# XGBoost
+
+The XGBoost model operates similarly to random forest so I left all the variables in the model except the customerID. An additional step I did here was to one hot encode the categorical variables so the XGBoost would run more smoothly. 
+The XGBoost variable importance plot reveals that the top five most important variables were Contract, tenure, MonthlyCharges, TotalCharges, and InternetServices.
+Using the xgboost model to predict on the training data, we get an accuracy of 0.8374  , sensitivity of 0.5923, and specificity of 0.9241. 
+Using the xgboost model to predict on the testing data, we get an accuracy of 0.7942 , sensitivity of 0.5316, and specificity of 0.8982.
+
+```{r}
+# Set seed
+set.seed(109)
+
+# one hot encode - testing
+cleaned_data <- data %>% dplyr::select(-c(customerID))
+
+# separate vehicle_trim to not be hot coded
+col_churn <- cleaned_data$Churn
+df_for_encode <- cleaned_data %>% dplyr::select(-c(Churn))
+
+df_encode <- one_hot(as.data.table(df_for_encode))
+
+df_encode <- cbind(df_encode,col_churn) %>%
+  rename(Churn = col_churn)
+
+# Split train and test data
+ind <- sample(2, nrow(df_encode), replace = T, prob = c(0.8, 0.2))
+train <- df_encode[ind == 1,]
+test <- df_encode[ind == 2,]
+
+# Boosting
+set.seed(109)
+boo <- train(Churn ~ .,
+             data=train,
+             method="xgbTree",
+             trControl=cvcontrol,
+             tuneGrid = expand.grid(nrounds = 500,
+                                    max_depth = 4,
+                                    eta = 0.28,
+                                    gamma = 1.8,
+                                    colsample_bytree = 1,
+                                    min_child_weight = 1,
+                                    subsample = 1))
+plot(varImp(boo))
+
+
+p_boo <- predict(boo, train, type = 'raw')
+confusionMatrix(p_boo, train$Churn, positive = '1')
+
+p_boo <- predict(boo, test, type = 'raw')
+confusionMatrix(p_boo, test$Churn, positive = '1')
+```
+
+# Conclusions
+
+Below, I reiterate the results of each model on the testing data.
+
+Using the regression model to predict on the testing data, we get an accuracy of 0.7357, sensitivity of 0.8301, and specificity of 0.6984. 
+
+Using the random forest model to predict on the testing data, we get an accuracy of 0.7873 , sensitivity of 0.4466, and specificity of 0.9222 
+
+Using the XGBoost model to predict on the testing data, we get an accuracy of 0.7942 , sensitivity of 0.5316, and specificity of 0.8982.
+
+
+According to the results, XGBoost has the highest accuracy in predicting whether a customer will leave the company. The random forest model is not far behind in accuracy and has the highest specificity. The xgboost model is the one I would recommend to the company for overall churn prediction. However, if the company is more concerned with predicting true negatives, which in this case are customers staying, I would recommend the random forest model because it has a higher specificity and its accuracy is not far behind that of the xgboost model. Because all three models outperformed the baseline rate, we can conclude that using any of these three models to predict customer churn is preferable to using the baseline rate.
+
+Tenure, InternetService, and MonthlyCharges were among the most important predictors used by all three models. A company that uses these churn prediction models should focus and devote additional resources on these areas to improve customer retention.
+
+
+# Data
+
+https://www.kaggle.com/datasets/blastchar/telco-customer-churn
